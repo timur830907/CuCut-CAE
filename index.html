@@ -75,13 +75,12 @@
     </div>
 
     <script>
-        // THREE.JS Engine & Chart.js Integration
         const container = document.getElementById('canvas-container');
         const scene = new THREE.Scene();
         scene.fog = new THREE.FogExp2(0x0b0f19, 0.15);
 
         const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
-        camera.position.set(2.5, 2.0, 3.0);
+        camera.position.set(2.2, 1.8, 2.5);
 
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
@@ -105,6 +104,7 @@
         const positions = new Float32Array(pCount * 3);
         const colors = new Float32Array(pCount * 3);
         const origPositions = new Float32Array(pCount * 3);
+        const velocities = new Float32Array(pCount * 3);
 
         let idx = 0;
         for (let x = -0.6; x < 0.6; x += 0.045) {
@@ -136,7 +136,7 @@
         scene.add(particles);
 
         const tool = new THREE.Mesh(
-            new THREE.ConeGeometry(0.4, 0.8, 4),
+            new THREE.ConeGeometry(0.35, 0.7, 4),
             new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.8 })
         );
         tool.rotation.z = Math.PI / 4;
@@ -165,28 +165,54 @@
         let isRunning = true;
         let toolX = -0.7;
 
+        function resetAll() {
+            toolX = -0.7;
+            tool.position.x = toolX;
+            const posAttr = particles.geometry.attributes.position;
+            const colAttr = particles.geometry.attributes.color;
+
+            for (let i = 0; i < pCount; i++) {
+                posAttr.setXYZ(i, origPositions[i*3], origPositions[i*3+1], origPositions[i*3+2]);
+                colAttr.setXYZ(i, 0.72, 0.45, 0.2);
+                velocities[i*3] = 0;
+                velocities[i*3+1] = 0;
+                velocities[i*3+2] = 0;
+            }
+            posAttr.needsUpdate = true;
+            colAttr.needsUpdate = true;
+        }
+
         function animate() {
             requestAnimationFrame(animate);
             if (isRunning) {
-                toolX += 0.005;
-                if (toolX > 0.8) toolX = -0.7;
+                toolX += 0.004;
+                if (toolX > 0.75) resetAll();
                 tool.position.x = toolX;
 
                 const posAttr = particles.geometry.attributes.position;
                 const colAttr = particles.geometry.attributes.color;
 
-                let fx = 120 + Math.random() * 20;
-                let fz = 45 + Math.random() * 10;
+                let fx = 120 + Math.random() * 15;
+                let fz = 45 + Math.random() * 8;
 
                 for (let i = 0; i < pCount; i++) {
                     let px = posAttr.getX(i);
                     let py = posAttr.getY(i);
+                    let pz = posAttr.getZ(i);
+
                     let dist = px - toolX;
 
-                    if (dist > -0.15 && dist < 0.1 && py > 0.05) {
-                        posAttr.setY(i, py + 0.008);
-                        colAttr.setXYZ(i, 1.0, 0.15, 0.0);
-                        fx += 0.15;
+                    // Контакт с режущей кромкой
+                    if (dist > -0.12 && dist < 0.08 && py > 0.0) {
+                        // Сдвиг частицы по передней грани резца
+                        let newY = Math.min(0.55, py + 0.006);
+                        let newX = px + 0.002;
+                        posAttr.setY(i, newY);
+                        posAttr.setX(i, newX);
+
+                        // Окраска деформированных частиц (Тепловая карта)
+                        colAttr.setXYZ(i, 0.95, 0.2, 0.05);
+                        fx += 0.12;
                     }
                 }
 
@@ -213,10 +239,7 @@
             e.target.innerText = isRunning ? 'Pause' : 'Play';
         });
 
-        document.getElementById('btn-reset').addEventListener('click', () => {
-            toolX = -0.7;
-            tool.position.x = toolX;
-        });
+        document.getElementById('btn-reset').addEventListener('click', resetAll);
     </script>
 </body>
 </html>
