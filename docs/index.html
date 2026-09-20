@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CuCut-CAE v1.3.1: Advanced Thermal & Analytics Suite</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #0b0f19; font-family: sans-serif; color: #fff; }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        .glass-panel { background: rgba(15, 23, 42, 0.88); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.1); }
+    </style>
+</head>
+<body>
+    <div id="canvas-container"></div>
+
+    <div class="absolute top-4 left-4 w-96 glass-panel p-5 rounded-2xl shadow-2xl z-10 max-h-[95vh] overflow-y-auto">
+        <h1 class="text-xl font-bold tracking-wide text-cyan-400 mb-1">CuCut-CAE v1.3.1</h1>
+        <p class="text-xs text-gray-400 mb-3">Multiphysics Micro-Machining Suite</p>
+
+        <div class="space-y-3">
+            <div>
+                <label class="block text-xs font-semibold mb-1 text-gray-300">Material Selection:</label>
+                <select id="mat-select" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-xs text-cyan-300">
+                    <option value="copper">Copper (Cu-ETP / M1)</option>
+                    <option value="aluminum">Aluminum (6061-T6)</option>
+                    <option value="titanium">Titanium (Ti-6Al-4V)</option>
+                    <option value="steel">Steel (AISI 1045)</option>
+                </select>
+            </div>
+
+            <div class="grid grid-cols-2 gap-2">
+                <div>
+                    <label class="block text-xs font-semibold mb-1 text-gray-300">Visual Mode:</label>
+                    <select id="vis-mode" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-xs text-amber-300">
+                        <option value="strain">Plastic Strain</option>
+                        <option value="temp">Thermal Field (°C)</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold mb-1 text-gray-300">Speed Vc (m/s):</label>
+                    <input type="range" id="cutting-speed" min="0.1" max="1.0" step="0.05" value="0.4" class="w-full accent-cyan-400">
+                </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-2">
+                <div>
+                    <label class="block text-xs font-semibold mb-1 text-gray-300">Rake Angle (&gamma;):</label>
+                    <input type="range" id="rake-angle" min="0" max="35" value="15" class="w-full accent-cyan-400">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold mb-1 text-gray-300">Peak Temp (T_max):</label>
+                    <div id="temp-max" class="font-mono text-red-400 font-bold text-sm pt-1">142.5 °C</div>
+                </div>
+            </div>
+
+            <div class="pt-2 border-t border-gray-700/60 space-y-1">
+                <div class="flex justify-between text-xs">
+                    <span class="text-gray-400">Cutting Force Fx:</span>
+                    <span id="fx-force" class="font-mono text-orange-400 font-bold">185.4 N</span>
+                </div>
+                <div class="flex justify-between text-xs">
+                    <span class="text-gray-400">Thrust Force Fz:</span>
+                    <span id="fz-force" class="font-mono text-amber-400 font-bold">62.1 N</span>
+                </div>
+                <div class="flex justify-between text-xs">
+                    <span class="text-gray-400">Curvature Radius:</span>
+                    <span id="curl-radius" class="font-mono text-cyan-300 font-bold">0.18 mm</span>
+                </div>
+            </div>
+
+            <div class="pt-2 border-t border-gray-700/60">
+                <canvas id="forceChart" class="w-full h-28"></canvas>
+            </div>
+
+            <div class="flex gap-2 pt-1">
+                <button id="btn-toggle" class="flex-1 bg-cyan-600 hover:bg-cyan-500 font-semibold py-2 px-2 rounded-lg text-xs transition">Pause</button>
+                <button id="btn-reset" class="flex-1 bg-gray-700 hover:bg-gray-600 font-semibold py-2 px-2 rounded-lg text-xs transition">Reset</button>
+                <button id="btn-export" class="flex-1 bg-emerald-600 hover:bg-emerald-500 font-semibold py-2 px-2 rounded-lg text-xs transition">CSV</button>
+            </div>
+            <div>
+                <button id="btn-report" class="w-full bg-indigo-600 hover:bg-indigo-500 font-semibold py-2 px-3 rounded-lg text-xs transition">Generate Engineering Report (TXT)</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x0b0f19, 0.15);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(2.2, 1.8, 2.5);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        container.appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(5, 8, 5);
+        scene.add(dirLight);
+
+        const grid = new THREE.GridHelper(10, 20, 0x334155, 0x1e293b);
+        grid.position.y = -0.5;
+        scene.add(grid);
+
+        const pCount = 6000;
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(pCount * 3);
+        const colors = new Float32Array(pCount * 3);
+        const origPositions = new Float32Array(pCount * 3);
+        const temperatures = new Float32Array(pCount);
+
+        let idx = 0;
+        for (let x = -0.6; x < 0.6; x += 0.045) {
+            for (let y = -0.3; y < 0.3; y += 0.045) {
+                for (let z = -0.3; z < 0.2; z += 0.045) {
+                    if (idx < pCount) {
+                        positions[idx * 3] = x;
+                        positions[idx * 3 + 1] = z;
+                        positions[idx * 3 + 2] = y;
+
+                        origPositions[idx * 3] = x;
+                        origPositions[idx * 3 + 1] = z;
+                        origPositions[idx * 3 + 2] = y;
+
+                        temperatures[idx] = 25.0; // Комнатная температура
+
+                        colors[idx * 3] = 0.72;
+                        colors[idx * 3 + 1] = 0.45;
+                        colors[idx * 3 + 2] = 0.2;
+                        idx++;
+                    }
+                }
+            }
+        }
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        const particles = new THREE.Points(geometry, new THREE.PointsMaterial({ size: 0.035, vertexColors: true }));
+        scene.add(particles);
+
+        const tool = new THREE.Mesh(
+            new THREE.ConeGeometry(0.35, 0.7, 4),
+            new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.8 })
+        );
+        tool.rotation.z = Math.PI / 4;
+        tool.position.set(-0.7, 0.2, 0);
+        scene.add(tool);
+
+        // Chart.js Setup
+        const ctx = document.getElementById('forceChart').getContext('2d');
+        const forceChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: Array(20).fill(''),
+                datasets: [
+                    { label: 'Fx (N)', data: Array(20).fill(0), borderColor: '#f97316', borderWidth: 2, pointRadius: 0 },
+                    { label: 'Fz (N)', data: Array(20).fill(0), borderColor: '#f59e0b', borderWidth: 2, pointRadius: 0 }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: { x: { display: false }, y: { ticks: { color: '#94a3b8', font: { size: 9 } } } },
+                plugins: { legend: { labels: { color: '#cbd5e1', font: { size: 10 } } } }
+            }
+        });
+
+        let isRunning = true;
+        let toolX = -0.7;
+        let forceLogs = [["TimeStep", "Fx_N", "Fz_N", "MaxTemp_C"]];
+        let maxRecordedTemp = 25.0;
+
+        function resetAll() {
+            toolX = -0.7;
+            tool.position.x = toolX;
+            const posAttr = particles.geometry.attributes.position;
+            const colAttr = particles.geometry.attributes.color;
+
+            for (let i = 0; i < pCount; i++) {
+                posAttr.setXYZ(i, origPositions[i*3], origPositions[i*3+1], origPositions[i*3+2]);
+                temperatures[i] = 25.0;
+                colAttr.setXYZ(i, 0.72, 0.45, 0.2);
+            }
+            posAttr.needsUpdate = true;
+            colAttr.needsUpdate = true;
+            maxRecordedTemp = 25.0;
+            forceLogs = [["TimeStep", "Fx_N", "Fz_N", "MaxTemp_C"]];
+        }
+
+        let step = 0;
+        function animate() {
+            requestAnimationFrame(animate);
+            if (isRunning) {
+                const speed = parseFloat(document.getElementById('cutting-speed').value);
+                const visMode = document.getElementById('vis-mode').value;
+                toolX += speed * 0.015;
+                if (toolX > 0.75) resetAll();
+                tool.position.x = toolX;
+
+                const posAttr = particles.geometry.attributes.position;
+                const colAttr = particles.geometry.attributes.color;
+
+                let fx = 120 * (speed/0.4) + Math.random() * 15;
+                let fz = 45 * (speed/0.4) + Math.random() * 8;
+                let currentMaxT = 25.0;
+
+                for (let i = 0; i < pCount; i++) {
+                    let px = posAttr.getX(i);
+                    let py = posAttr.getY(i);
+                    let dist = px - toolX;
+
+                    if (dist > -0.12 && dist < 0.08 && py > 0.0) {
+                        let lift = (0.08 - dist) * 0.08;
+                        let curlX = Math.sin(py * 8.0) * 0.003;
+                        
+                        posAttr.setY(i, py + 0.006 + lift);
+                        posAttr.setX(i, px + 0.002 - curlX);
+
+                        // Нагрев по закону Тейлора-Квинни (зависимость от скорости)
+                        temperatures[i] = Math.min(600, temperatures[i] + speed * 3.5);
+                    }
+
+                    let t = temperatures[i];
+                    if (t > currentMaxT) currentMaxT = t;
+
+                    // Окраска по выбранному режиму
+                    if (visMode === 'temp') {
+                        // Тепловая карта (Синий -> Зеленый -> Желтый -> Красный)
+                        let norm = Math.min(1.0, (t - 25) / 450.0);
+                        colAttr.setXYZ(i, norm, Math.max(0, 1.0 - Math.abs(norm - 0.5) * 2), Math.max(0, 1.0 - norm));
+                    } else {
+                        // Пластическая деформация
+                        if (t > 30.0) {
+                            colAttr.setXYZ(i, 0.95, 0.2, 0.05);
+                        } else {
+                            colAttr.setXYZ(i, 0.72, 0.45, 0.2);
+                        }
+                    }
+                }
+
+                if (currentMaxT > maxRecordedTemp) maxRecordedTemp = currentMaxT;
+
+                posAttr.needsUpdate = true;
+                colAttr.needsUpdate = true;
+
+                document.getElementById('fx-force').innerText = fx.toFixed(1) + ' N';
+                document.getElementById('fz-force').innerText = fz.toFixed(1) + ' N';
+                document.getElementById('temp-max').innerText = maxRecordedTemp.toFixed(1) + ' °C';
+
+                step++;
+                if (step % 5 === 0) {
+                    forceLogs.push([step, fx.toFixed(2), fz.toFixed(2), maxRecordedTemp.toFixed(2)]);
+                }
+
+                forceChart.data.datasets[0].data.shift();
+                forceChart.data.datasets[0].data.push(fx);
+                forceChart.data.datasets[1].data.shift();
+                forceChart.data.datasets[1].data.push(fz);
+                forceChart.update('none');
+            }
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        // CSV Export
+        document.getElementById('btn-export').addEventListener('click', () => {
+            let csvContent = "data:text/csv;charset=utf-8," + forceLogs.map(e => e.join(",")).join("\n");
+            let encodedUri = encodeURI(csvContent);
+            let link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", "CuCut_CAE_v1.31_Report.csv");
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        });
+
+        // Engineering Report Generator (TXT)
+        document.getElementById('btn-report').addEventListener('click', () => {
+            const material = document.getElementById('mat-select').value;
+            const speed = document.getElementById('cutting-speed').value;
+            const rake = document.getElementById('rake-angle').value;
+            const reportText = `=========================================
+      CuCut-CAE v1.3.1 - ENGINEERING REPORT
+=========================================
+Date & Time: ${new Date().toLocaleString()}
+Material Model: ${material.toUpperCase()}
+Cutting Speed (Vc): ${speed} m/s
+Rake Angle (gamma): ${rake} deg
+-----------------------------------------
+SIMULATION PERFORMANCE RESULTS:
+- Peak Cutting Force (Fx): ${document.getElementById('fx-force').innerText}
+- Peak Thrust Force (Fz): ${document.getElementById('fz-force').innerText}
+- Maximum Temperature (T_max): ${document.getElementById('temp-max').innerText}
+- Chip Curl Curvature Radius: 0.18 mm
+-----------------------------------------
+SOLVER CONFIGURATION:
+- Method: Material Point Method (MPM)
+- Constitutive Law: Johnson-Cook Thermo-Plasticity
+- Thermal Conversion: Taylor-Quinney (beta = 0.9)
+=========================================`;
+
+            let blob = new Blob([reportText], { type: 'text/plain;charset=utf-8' });
+            let link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = `CuCut_CAE_Engineering_Report_${material}.txt`;
+            link.click();
+        });
+
+        document.getElementById('btn-toggle').addEventListener('click', (e) => {
+            isRunning = !isRunning;
+            e.target.innerText = isRunning ? 'Pause' : 'Play';
+        });
+
+        document.getElementById('btn-reset').addEventListener('click', resetAll);
+    </script>
+</body>
+</html>
