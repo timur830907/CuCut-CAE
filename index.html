@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CuCut-CAE v1.3: Thermo-Mechanical Multiphysics</title>
+    <title>CuCut-CAE v1.3: Advanced Chip Dynamics & Analytics</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
@@ -17,16 +17,15 @@
 <body>
     <div id="canvas-container"></div>
 
-    <!-- UI Overlay / Controls -->
     <div class="absolute top-4 left-4 w-96 glass-panel p-5 rounded-2xl shadow-2xl z-10 max-h-[95vh] overflow-y-auto">
         <h1 class="text-xl font-bold tracking-wide text-cyan-400 mb-1">CuCut-CAE v1.3</h1>
-        <p class="text-xs text-gray-400 mb-3">Thermo-Mechanical Multiphysics Web Suite</p>
+        <p class="text-xs text-gray-400 mb-3">Multiphysics Micro-Machining Suite</p>
 
         <div class="space-y-3">
             <div>
-                <label class="block text-xs font-semibold mb-1 text-gray-300">Material Selection:</label>
+                <label class="block text-xs font-semibold mb-1 text-gray-300">Material:</label>
                 <select id="mat-select" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-xs text-cyan-300">
-                    <option value="copper">Copper (Cu-ETP)</option>
+                    <option value="copper">Copper (Cu-ETP / M1)</option>
                     <option value="aluminum">Aluminum (6061-T6)</option>
                     <option value="titanium">Titanium (Ti-6Al-4V)</option>
                     <option value="steel">Steel (AISI 1045)</option>
@@ -35,10 +34,10 @@
 
             <div class="grid grid-cols-2 gap-2">
                 <div>
-                    <label class="block text-xs font-semibold mb-1 text-gray-300">Visual Mode:</label>
-                    <select id="vis-mode" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-xs text-amber-300">
-                        <option value="strain">Plastic Strain</option>
-                        <option value="temp">Temperature (°C)</option>
+                    <label class="block text-xs font-semibold mb-1 text-gray-300">Tool Feature:</label>
+                    <select id="tool-feature" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-xs text-amber-300">
+                        <option value="flat">Standard Flat Face</option>
+                        <option value="breaker">Grooved Chip Breaker</option>
                     </select>
                 </div>
                 <div>
@@ -57,12 +56,11 @@
                     <span id="fz-force" class="font-mono text-amber-400 font-bold">62.1 N</span>
                 </div>
                 <div class="flex justify-between text-xs">
-                    <span class="text-gray-400">Peak Temp (T_max):</span>
-                    <span id="temp-max" class="font-mono text-red-400 font-bold">142.5 °C</span>
+                    <span class="text-gray-400">Curvature Radius:</span>
+                    <span id="curl-radius" class="font-mono text-cyan-300 font-bold">0.18 mm</span>
                 </div>
             </div>
 
-            <!-- Live Force Chart -->
             <div class="pt-2 border-t border-gray-700/60">
                 <canvas id="forceChart" class="w-full h-28"></canvas>
             </div>
@@ -70,6 +68,7 @@
             <div class="flex gap-2 pt-1">
                 <button id="btn-toggle" class="flex-1 bg-cyan-600 hover:bg-cyan-500 font-semibold py-2 px-3 rounded-lg text-xs transition">Pause</button>
                 <button id="btn-reset" class="flex-1 bg-gray-700 hover:bg-gray-600 font-semibold py-2 px-3 rounded-lg text-xs transition">Reset</button>
+                <button id="btn-export" class="flex-1 bg-emerald-600 hover:bg-emerald-500 font-semibold py-2 px-3 rounded-lg text-xs transition">CSV Export</button>
             </div>
         </div>
     </div>
@@ -98,13 +97,11 @@
         grid.position.y = -0.5;
         scene.add(grid);
 
-        // Particles setup
         const pCount = 6000;
         const geometry = new THREE.BufferGeometry();
         const positions = new Float32Array(pCount * 3);
         const colors = new Float32Array(pCount * 3);
         const origPositions = new Float32Array(pCount * 3);
-        const velocities = new Float32Array(pCount * 3);
 
         let idx = 0;
         for (let x = -0.6; x < 0.6; x += 0.045) {
@@ -131,8 +128,7 @@
         geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
         geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
-        const material = new THREE.PointsMaterial({ size: 0.035, vertexColors: true });
-        const particles = new THREE.Points(geometry, material);
+        const particles = new THREE.Points(geometry, new THREE.PointsMaterial({ size: 0.035, vertexColors: true }));
         scene.add(particles);
 
         const tool = new THREE.Mesh(
@@ -143,7 +139,7 @@
         tool.position.set(-0.7, 0.2, 0);
         scene.add(tool);
 
-        // Chart.js Live Forces
+        // Chart.js Setup
         const ctx = document.getElementById('forceChart').getContext('2d');
         const forceChart = new Chart(ctx, {
             type: 'line',
@@ -164,6 +160,7 @@
 
         let isRunning = true;
         let toolX = -0.7;
+        let forceLogs = [["TimeStep", "Fx_N", "Fz_N"]];
 
         function resetAll() {
             toolX = -0.7;
@@ -174,14 +171,13 @@
             for (let i = 0; i < pCount; i++) {
                 posAttr.setXYZ(i, origPositions[i*3], origPositions[i*3+1], origPositions[i*3+2]);
                 colAttr.setXYZ(i, 0.72, 0.45, 0.2);
-                velocities[i*3] = 0;
-                velocities[i*3+1] = 0;
-                velocities[i*3+2] = 0;
             }
             posAttr.needsUpdate = true;
             colAttr.needsUpdate = true;
+            forceLogs = [["TimeStep", "Fx_N", "Fz_N"]];
         }
 
+        let step = 0;
         function animate() {
             requestAnimationFrame(animate);
             if (isRunning) {
@@ -198,19 +194,15 @@
                 for (let i = 0; i < pCount; i++) {
                     let px = posAttr.getX(i);
                     let py = posAttr.getY(i);
-                    let pz = posAttr.getZ(i);
-
                     let dist = px - toolX;
 
-                    // Контакт с режущей кромкой
                     if (dist > -0.12 && dist < 0.08 && py > 0.0) {
-                        // Сдвиг частицы по передней грани резца
-                        let newY = Math.min(0.55, py + 0.006);
-                        let newX = px + 0.002;
-                        posAttr.setY(i, newY);
-                        posAttr.setX(i, newX);
-
-                        // Окраска деформированных частиц (Тепловая карта)
+                        // Числовая модель изгиба / завивания стружки (Curling Moment)
+                        let lift = (0.08 - dist) * 0.08;
+                        let curlX = Math.sin(py * 8.0) * 0.003;
+                        
+                        posAttr.setY(i, py + 0.006 + lift);
+                        posAttr.setX(i, px + 0.002 - curlX);
                         colAttr.setXYZ(i, 0.95, 0.2, 0.05);
                         fx += 0.12;
                     }
@@ -221,6 +213,11 @@
 
                 document.getElementById('fx-force').innerText = fx.toFixed(1) + ' N';
                 document.getElementById('fz-force').innerText = fz.toFixed(1) + ' N';
+
+                step++;
+                if (step % 5 === 0) {
+                    forceLogs.push([step, fx.toFixed(2), fz.toFixed(2)]);
+                }
 
                 forceChart.data.datasets[0].data.shift();
                 forceChart.data.datasets[0].data.push(fx);
@@ -233,6 +230,18 @@
         }
 
         animate();
+
+        // CSV Export Handler
+        document.getElementById('btn-export').addEventListener('click', () => {
+            let csvContent = "data:text/csv;charset=utf-8," + forceLogs.map(e => e.join(",")).join("\n");
+            let encodedUri = encodeURI(csvContent);
+            let link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", "CuCut_CAE_Forces_Report.csv");
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        });
 
         document.getElementById('btn-toggle').addEventListener('click', (e) => {
             isRunning = !isRunning;
