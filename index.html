@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CuCut-CAE: 3D Micro-Cutting Simulator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #0b0f19; font-family: sans-serif; color: #fff; }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        .glass-panel { background: rgba(15, 23, 42, 0.85); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.1); }
+    </style>
+</head>
+<body>
+    <div id="canvas-container"></div>
+
+    <!-- UI Overlay / Controls -->
+    <div class="absolute top-4 left-4 w-80 glass-panel p-5 rounded-2xl shadow-2xl z-10">
+        <h1 class="text-xl font-bold tracking-wide text-cyan-400 mb-1">CuCut-CAE v1.2</h1>
+        <p class="text-xs text-gray-400 mb-4">3D Copper Micro-Machining Web Simulator</p>
+
+        <div class="space-y-4">
+            <div>
+                <label class="flex justify-between text-xs font-semibold mb-1">
+                    <span>Cutting Speed (V):</span>
+                    <span id="v-val" class="text-cyan-400">0.25 m/s</span>
+                </label>
+                <input type="range" id="v-speed" min="0.05" max="0.8" step="0.05" value="0.25" class="w-full accent-cyan-400">
+            </div>
+
+            <div>
+                <label class="flex justify-between text-xs font-semibold mb-1">
+                    <span>Cut Depth (t):</span>
+                    <span id="t-val" class="text-cyan-400">0.05 mm</span>
+                </label>
+                <input type="range" id="t-depth" min="0.01" max="0.12" step="0.01" value="0.05" class="w-full accent-cyan-400">
+            </div>
+
+            <div>
+                <label class="flex justify-between text-xs font-semibold mb-1">
+                    <span>Rake Angle (&gamma;):</span>
+                    <span id="rake-val" class="text-cyan-400">15&deg;</span>
+                </label>
+                <input type="range" id="rake-angle" min="0" max="35" step="1" value="15" class="w-full accent-cyan-400">
+            </div>
+
+            <div class="pt-2 border-t border-gray-700/60 space-y-1">
+                <div class="flex justify-between text-xs">
+                    <span class="text-gray-400">Cutting Force Fx:</span>
+                    <span id="fx-force" class="font-mono text-orange-400 font-bold">185.4 N</span>
+                </div>
+                <div class="flex justify-between text-xs">
+                    <span class="text-gray-400">Thrust Force Fz:</span>
+                    <span id="fz-force" class="font-mono text-amber-400 font-bold">62.1 N</span>
+                </div>
+            </div>
+
+            <div class="flex gap-2 pt-2">
+                <button id="btn-toggle" class="flex-1 bg-cyan-600 hover:bg-cyan-500 font-semibold py-2 px-3 rounded-lg text-xs transition">Pause</button>
+                <button id="btn-reset" class="flex-1 bg-gray-700 hover:bg-gray-600 font-semibold py-2 px-3 rounded-lg text-xs transition">Reset</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- THREE.JS 3D SIMULATOR ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x0b0f19, 0.15);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(2.5, 2.0, 3.0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.shadowMap.enabled = true;
+        container.appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 0, 0);
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(5, 8, 5);
+        dirLight.castShadow = true;
+        scene.add(dirLight);
+
+        // Grid Plane
+        const grid = new THREE.GridHelper(10, 20, 0x334155, 0x1e293b);
+        grid.position.y = -0.5;
+        scene.add(grid);
+
+        // Workpiece Particles (Copper)
+        const pCount = 8000;
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(pCount * 3);
+        const colors = new Float32Array(pCount * 3);
+        const origPositions = new Float32Array(pCount * 3);
+
+        const copperColor = new THREE.Color(0xb87333);
+        const stressColor = new THREE.Color(0xff2200);
+
+        let idx = 0;
+        for (let x = -0.6; x < 0.6; x += 0.04) {
+            for (let y = -0.3; y < 0.3; y += 0.04) {
+                for (let z = -0.3; z < 0.2; z += 0.04) {
+                    if (idx < pCount) {
+                        positions[idx * 3] = x;
+                        positions[idx * 3 + 1] = z;
+                        positions[idx * 3 + 2] = y;
+
+                        origPositions[idx * 3] = x;
+                        origPositions[idx * 3 + 1] = z;
+                        origPositions[idx * 3 + 2] = y;
+
+                        colors[idx * 3] = copperColor.r;
+                        colors[idx * 3 + 1] = copperColor.g;
+                        colors[idx * 3 + 2] = copperColor.b;
+                        idx++;
+                    }
+                }
+            }
+        }
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        const material = new THREE.PointsMaterial({ size: 0.03, vertexColors: true });
+        const particles = new THREE.Points(geometry, material);
+        scene.add(particles);
+
+        // Tool Wedge (Tool Geometry)
+        const toolGeom = new THREE.ConeGeometry(0.4, 0.8, 4);
+        const toolMat = new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.8, roughness: 0.2 });
+        const tool = new THREE.Mesh(toolGeom, toolMat);
+        tool.rotation.z = Math.PI / 4;
+        tool.position.set(-0.7, 0.2, 0);
+        scene.add(tool);
+
+        // Controls Logic
+        let isRunning = true;
+        let speed = 0.005;
+        let toolX = -0.7;
+
+        document.getElementById('v-speed').addEventListener('input', (e) => {
+            speed = parseFloat(e.target.value) * 0.02;
+            document.getElementById('v-val').innerText = e.target.value + ' m/s';
+        });
+
+        document.getElementById('t-depth').addEventListener('input', (e) => {
+            document.getElementById('t-val').innerText = e.target.value + ' mm';
+        });
+
+        document.getElementById('rake-angle').addEventListener('input', (e) => {
+            const deg = parseFloat(e.target.value);
+            tool.rotation.z = (Math.PI / 4) + (deg * Math.PI / 180) * 0.3;
+            document.getElementById('rake-val').innerHTML = deg + '&deg;';
+        });
+
+        document.getElementById('btn-toggle').addEventListener('click', (e) => {
+            isRunning = !isRunning;
+            e.target.innerText = isRunning ? 'Pause' : 'Play';
+        });
+
+        document.getElementById('btn-reset').addEventListener('click', () => {
+            toolX = -0.7;
+            tool.position.x = toolX;
+            const posAttr = particles.geometry.attributes.position;
+            const colAttr = particles.geometry.attributes.color;
+
+            for (let i = 0; i < pCount; i++) {
+                posAttr.setXYZ(i, origPositions[i*3], origPositions[i*3+1], origPositions[i*3+2]);
+                colAttr.setXYZ(i, copperColor.r, copperColor.g, copperColor.b);
+            }
+            posAttr.needsUpdate = true;
+            colAttr.needsUpdate = true;
+        });
+
+        // Animation Loop
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (isRunning) {
+                toolX += speed;
+                if (toolX > 0.8) toolX = -0.7;
+                tool.position.x = toolX;
+
+                const posAttr = particles.geometry.attributes.position;
+                const colAttr = particles.geometry.attributes.color;
+
+                let activeFx = 0;
+                let activeFz = 0;
+
+                for (let i = 0; i < pCount; i++) {
+                    let px = posAttr.getX(i);
+                    let py = posAttr.getY(i);
+                    let pz = posAttr.getZ(i);
+
+                    let dist = px - toolX;
+                    if (dist > -0.15 && dist < 0.1 && py > 0.05) {
+                        // Deform particles upward (chip formation)
+                        posAttr.setY(i, py + 0.008);
+                        posAttr.setX(i, px + speed * 0.6);
+
+                        // Stress Heatmap transition
+                        colAttr.setXYZ(i, stressColor.r, stressColor.g, stressColor.b);
+                        activeFx += 0.05;
+                        activeFz += 0.02;
+                    }
+                }
+
+                document.getElementById('fx-force').innerText = (120 + activeFx * 15).toFixed(1) + ' N';
+                document.getElementById('fz-force').innerText = (40 + activeFz * 8).toFixed(1) + ' N';
+
+                posAttr.needsUpdate = true;
+                colAttr.needsUpdate = true;
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
