@@ -1,3 +1,4 @@
 taichi>=1.7.0
 numpy>=1.20.0
 matplotlib>=3.5.0
+pyevtk>=1.6.0

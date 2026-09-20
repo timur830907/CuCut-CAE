@@ -1,5 +1,11 @@
+import os
 import taichi as ti
 import numpy as np
+try:
+    from pyevtk.hl import pointsToVTK
+    VTK_AVAILABLE = True
+except ImportError:
+    VTK_AVAILABLE = False
 
 # -----------------------------------------------------------------------------
 # 1. ИНИЦИАЛИЗАЦИЯ И ПАРАМЕТРЫ СЕТКИ
@@ -13,59 +19,71 @@ dx = 1.0 / n_grid
 inv_dx = float(n_grid)
 dt = 1e-4
 
-# Параметры модели Джонсона-Кука для меди (Cu-ETP / М1)
-JC_A = 90.0    # Начальный предел текучести (МПа)
+# Модель Джонсона-Кука для меди M1 / Cu-ETP
+JC_A = 90.0    # Предел текучести (МПа)
 JC_B = 292.0   # Модуль деформационного упрочнения (МПа)
 JC_n = 0.31    # Показатель степени упрочнения
 p_rho = 8.96   # Плотность меди (г/см3)
 
 p_vol = (dx * 0.5) ** 3
 p_mass = p_vol * p_rho
-E, nu = 110e3, 0.34  # Модуль Юнга (МПа) и коэффициент Пуассона
+E, nu = 110e3, 0.34
 mu_0, lambda_0 = E / (2 * (1 + nu)), E * nu / ((1 + nu) * (1 - 2 * nu))
 
 # -----------------------------------------------------------------------------
-# 2. ПОЛЯ И ЦВЕТОВАЯ КАРТА НАПРЯЖЕНИЙ
+# 2. ПОЛЯ И РАСЧЕТ СИЛ
 # -----------------------------------------------------------------------------
-x = ti.Vector.field(dim, float, shape=n_particles)      # Позиции частиц
+x = ti.Vector.field(dim, float, shape=n_particles)      # Позиции
 v = ti.Vector.field(dim, float, shape=n_particles)      # Скорости
 C = ti.Matrix.field(dim, dim, float, shape=n_particles)  # Деформация
 F = ti.Matrix.field(dim, dim, float, shape=n_particles)  # Градиент
-equivalent_plastic_strain = ti.field(float, shape=n_particles) # Пластическая деформация
-particle_colors = ti.Vector.field(3, float, shape=n_particles)  # Цвета RGB
+equivalent_plastic_strain = ti.field(float, shape=n_particles)
+particle_colors = ti.Vector.field(3, float, shape=n_particles)
 
 grid_v = ti.Vector.field(dim, float, shape=(n_grid, n_grid, n_grid))
 grid_m = ti.field(float, shape=(n_grid, n_grid, n_grid))
 
-# Параметры резания
+# Параметры резания и геометрия
 tool_pos = ti.Vector.field(dim, float, shape=())
-tool_speed = ti.field(float, shape=())    # Скорость V (X)
-cut_depth = ti.field(float, shape=())     # Глубина t (Z)
-feed_rate = ti.field(float, shape=())     # Подача S (Y)
+tool_speed = ti.field(float, shape=())     # Скорость V (X)
+cut_depth = ti.field(float, shape=())      # Глубина t (Z)
+feed_rate = ti.field(float, shape=())      # Подача S (Y)
+rake_angle = ti.field(float, shape=())     # Угол заточки Gamma (градусы)
+
+# Поля для силы резания
+Fx_field = ti.field(float, shape=())
+Fz_field = ti.field(float, shape=())
+
+frame_count = 0
 
 # -----------------------------------------------------------------------------
-# 3. ИНИЦИАЛИЗАЦИЯ И СБРОС
+# 3. ИНИЦИАЛИЗАЦИЯИ СБРОС
 # -----------------------------------------------------------------------------
 @ti.kernel
 def reset_simulation():
     tool_pos[None] = [0.15, 0.2, 0.5 + cut_depth[None]]
+    Fx_field[None] = 0.0
+    Fz_field[None] = 0.0
     for i in range(n_particles):
         x[i] = [
-            ti.random() * 0.5 + 0.25,  # X
-            ti.random() * 0.4 + 0.3,   # Y
-            ti.random() * 0.25 + 0.35  # Z
+            ti.random() * 0.5 + 0.25,
+            ti.random() * 0.4 + 0.3,
+            ti.random() * 0.25 + 0.35
         ]
         v[i] = [0, 0, 0]
         F[i] = ti.Matrix.identity(float, dim)
         C[i] = ti.Matrix.zero(float, dim, dim)
         equivalent_plastic_strain[i] = 0.0
-        particle_colors[i] = [0.72, 0.45, 0.2] # Базовый медный цвет
+        particle_colors[i] = [0.72, 0.45, 0.2]
 
 # -----------------------------------------------------------------------------
-# 4. ФИЗИЧЕСКИЙ РЕШАТЕЛЬ С ОПТИКИРОВАНИЕМ ЦВЕТА
+# 4. ФИЗИЧЕСКИЙ РЕШАТЕЛЬ (3D MPM + Force Calculation)
 # -----------------------------------------------------------------------------
 @ti.kernel
 def substep():
+    Fx_field[None] = 0.0
+    Fz_field[None] = 0.0
+
     for i, j, k in grid_m:
         grid_v[i, j, k] = [0, 0, 0]
         grid_m[i, j, k] = 0
@@ -79,18 +97,11 @@ def substep():
 
         F[p] = (ti.Matrix.identity(float, dim) + dt * C[p]) @ F[p]
         
-        # Обновление деформации по Джонсону-Куку
         eps_p = equivalent_plastic_strain[p]
         equivalent_plastic_strain[p] += dt * 0.8 * (C[p].norm() + 1e-5)
         
-        # Динамическое обновление цвета от деформации (Stress Heatmap)
-        # Синий -> Зеленый -> Желтый -> Красный
         val = ti.min(1.0, equivalent_plastic_strain[p] * 0.15)
-        particle_colors[p] = [
-            0.72 + val * 0.28,        # Red channel
-            0.45 * (1.0 - val),       # Green channel
-            0.2 * (1.0 - val)         # Blue channel
-        ]
+        particle_colors[p] = [0.72 + val * 0.28, 0.45 * (1.0 - val), 0.2 * (1.0 - val)]
 
         U, sig, V = ti.svd(F[p])
         J = 1.0
@@ -108,6 +119,9 @@ def substep():
             grid_v[base + offset] += weight * (p_mass * v[p] + affine @ dpos)
             grid_m[base + offset] += weight * p_mass
 
+    # Угол заточки и расчет реакций резания
+    tan_gamma = ti.tan(rake_angle[None] * 3.1415926 / 180.0)
+
     for i, j, k in grid_m:
         if grid_m[i, j, k] > 0:
             grid_v[i, j, k] = (1 / grid_m[i, j, k]) * grid_v[i, j, k]
@@ -117,7 +131,13 @@ def substep():
                 grid_v[i, j, k] = [0, 0, 0]
 
             t_p = tool_pos[None]
-            if pos.x > t_p.x - (pos.z - t_p.z) * 0.7 and pos.x < t_p.x + 0.25 and pos.z > t_p.z and pos.y > t_p.y - 0.25 and pos.y < t_p.y + 0.25:
+            # Динамическая передняя грань с учетом угла rake_angle
+            bound_x = t_p.x - (pos.z - t_p.z) * tan_gamma
+            if pos.x > bound_x and pos.x < t_p.x + 0.25 and pos.z > t_p.z and pos.y > t_p.y - 0.25 and pos.y < t_p.y + 0.25:
+                # Оценка силы как изменения импульса на грани резца
+                delta_v = ti.Vector([tool_speed[None], feed_rate[None], 0.0]) - grid_v[i, j, k]
+                Fx_field[None] += grid_m[i, j, k] * ti.abs(delta_v.x) / dt
+                Fz_field[None] += grid_m[i, j, k] * ti.abs(delta_v.z) / dt
                 grid_v[i, j, k] = ti.Vector([tool_speed[None], feed_rate[None], 0.0])
 
     for p in x:
@@ -135,10 +155,22 @@ def substep():
         v[p], C[p] = new_v, new_C
         x[p] += dt * v[p]
 
+# Экспорт в формат VTK для ParaView
+def export_vtk(frame):
+    if not VTK_AVAILABLE:
+        return
+    os.makedirs("vtk_output", exist_ok=True)
+    pos_np = x.to_numpy()
+    eps_np = equivalent_plastic_strain.to_numpy()
+    px = np.ascontiguousarray(pos_np[:, 0])
+    py = np.ascontiguousarray(pos_np[:, 1])
+    pz = np.ascontiguousarray(pos_np[:, 2])
+    pointsToVTK(f"vtk_output/frame_{frame:04d}", px, py, pz, data={"plastic_strain": eps_np})
+
 # -----------------------------------------------------------------------------
-# 5. ИНТЕРФЕЙС И ОТРЕСОВКА
+# 5. ИНТЕРФЕЙС И ОТРЕСОВКА (GUI)
 # -----------------------------------------------------------------------------
-window = ti.ui.Window("CuCut-CAE: Stress Field Visualization", (1024, 768))
+window = ti.ui.Window("CuCut-CAE v1.2: Advanced Cutting Analytics", (1024, 768))
 canvas = window.get_canvas()
 scene = window.get_scene()
 camera = ti.ui.Camera()
@@ -146,6 +178,7 @@ camera = ti.ui.Camera()
 tool_speed[None] = 0.25
 feed_rate[None] = 0.01
 cut_depth[None] = -0.05
+rake_angle[None] = 15.0  # Угол заточки по умолчанию 15 градусов
 
 reset_simulation()
 
@@ -160,17 +193,26 @@ while window.running:
     scene.point_light(pos=(1.5, 1.5, 1.5), color=(1, 1, 1))
     scene.ambient_light((0.3, 0.3, 0.3))
 
-    # Отображение частицы с динамическими цветами напряжений
     scene.particles(x, radius=0.005, per_vertex_color=particle_colors)
-
     canvas.scene(scene)
 
-    window.GUI.begin("Cutting Parameters", 0.02, 0.02, 0.32, 0.28)
-    window.GUI.text("CuCut-CAE v1.1 (Stress Field)")
+    # --- UI ПАНЕЛЬ УПРАВЛЕНИЯ И АНАЛИТИКИ ---
+    window.GUI.begin("Cutting Parameters & Forces", 0.02, 0.02, 0.36, 0.38)
+    window.GUI.text("CuCut-CAE v1.2 Analytics")
+    
     tool_speed[None] = window.GUI.slider_float("Cutting Speed V (X)", tool_speed[None], 0.05, 0.8)
     feed_rate[None] = window.GUI.slider_float("Feed Rate S (Y)", feed_rate[None], 0.0, 0.05)
     cut_depth[None] = window.GUI.slider_float("Cut Depth t (Z)", cut_depth[None], -0.1, 0.0)
+    rake_angle[None] = window.GUI.slider_float("Rake Angle Gamma (deg)", rake_angle[None], 0.0, 35.0)
+
+    window.GUI.text("-----------------------------")
+    window.GUI.text(f"Cutting Force Fx: {Fx_field[None]:.2f} N")
+    window.GUI.text(f"Thrust Force Fz:  {Fz_field[None]:.2f} N")
     
+    if window.GUI.button("Export Frame to VTK (ParaView)"):
+        export_vtk(frame_count)
+        frame_count += 1
+        
     if window.GUI.button("Reset Simulation"):
         reset_simulation()
     window.GUI.end()
